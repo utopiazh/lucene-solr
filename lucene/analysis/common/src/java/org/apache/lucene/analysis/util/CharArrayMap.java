@@ -27,7 +27,9 @@ import java.util.Set;
 import org.apache.lucene.analysis.util.CharacterUtils;
 import org.apache.lucene.util.Version;
 
-
+/**
+ * TODO: 这个类需要看一下，类似于BloomFilter。重点在于两个getSlot（）函数。
+ */
 /**
  * A simple class that stores key Strings as char[]'s in a
  * hash table. Note that this is not a general purpose
@@ -78,6 +80,7 @@ public class CharArrayMap<V> extends AbstractMap<Object,V> {
   public CharArrayMap(Version matchVersion, int startSize, boolean ignoreCase) {
     this.ignoreCase = ignoreCase;
     int size = INIT_SIZE;
+    // 保证填充率 < 80 % (1/(1 + 1/4))
     while(startSize + (startSize>>2) > size)
       size <<= 1;
     keys = new char[size][];
@@ -161,14 +164,36 @@ public class CharArrayMap<V> extends AbstractMap<Object,V> {
     return get(o.toString());
   }
 
+  /**
+   * 返回一个位置信息，这个位置上的字符串有两种情形：
+   * A： 与目标字符串相等
+   *     ==》 目标存在
+   * B:  为空
+   *     ==》 目标不存在
+   *  
+   * @param text
+   * @param off
+   * @param len
+   * @return
+   */
   private int getSlot(char[] text, int off, int len) {
+	// 计算初始位置
     int code = getHashCode(text, off, len);
     int pos = code & (keys.length-1);
-    char[] text2 = keys[pos];
+    // 判断是否有重复
+    char[] text2 = keys[pos];    
     if (text2 != null && !equals(text, off, len, text2)) {
+      // 计算步长
+      // A： code < 256, 
+      //    	 inc 为 code 或 code + 1
+      // B: code >= 256
+      //         inc 为 code + code/256  或 code + code/256
+      // "|1" 可以保证步长为奇数
       final int inc = ((code>>8)+code)|1;
+      // 循环直到碰到匹配的字符串或者碰到空白域
       do {
         code += inc;
+        // X mod Y, 一般设计会是Y = 2^Z, 所以 X mod Y = X & (Y - 1).
         pos = code & (keys.length-1);
         text2 = keys[pos];
       } while (text2 != null && !equals(text, off, len, text2));
