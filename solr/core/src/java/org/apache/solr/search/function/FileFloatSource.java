@@ -75,12 +75,12 @@ public class FileFloatSource extends ValueSource {
   public String description() {
     return "float(" + field + ')';
   }
-
+  // 加载数据的入口
   @Override
   public FunctionValues getValues(Map context, AtomicReaderContext readerContext) throws IOException {
     final int off = readerContext.docBase;
     IndexReaderContext topLevelContext = ReaderUtil.getTopLevelContext(readerContext);
-
+    // 考虑缓存层的数据加载
     final float[] arr = getCachedFloats(topLevelContext.reader());
     return new FloatDocValues(this) {
       @Override
@@ -144,7 +144,7 @@ public class FileFloatSource extends ValueSource {
   static Cache floatCache = new Cache() {
     @Override
     protected Object createValue(IndexReader reader, Object key) {
-      return getFloats(((Entry)key).ffs, reader);
+      return getFloats(((Entry)key).ffs, reader);  // 从文件中加载数据
     }
   };
 
@@ -187,7 +187,7 @@ public class FileFloatSource extends ValueSource {
         synchronized (value) {
           CreationPlaceholder progress = (CreationPlaceholder) value;
           if (progress.value == null) {
-            progress.value = createValue(reader, key);
+            progress.value = createValue(reader, key); // 加载数据
             synchronized (readerCache) {
               innerCache.put(key, progress.value);
               onlyForTesting = progress.value;
@@ -238,14 +238,14 @@ public class FileFloatSource extends ValueSource {
 
 
   private static float[] getFloats(FileFloatSource ffs, IndexReader reader) {
-    float[] vals = new float[reader.maxDoc()];
+    float[] vals = new float[reader.maxDoc()];  // 跟lucene原本的数据一直，保存为数组
     if (ffs.defVal != 0) {
       Arrays.fill(vals, ffs.defVal);
     }
     InputStream is;
-    String fname = "external_" + ffs.field.getName();
-    try {
-      is = VersionedFile.getLatestFile(ffs.dataDir, fname);
+    String fname = "external_" + ffs.field.getName();  // 文件名的prefix
+    try { 
+      is = VersionedFile.getLatestFile(ffs.dataDir, fname); // 以prefix开始的文件中，字母顺序最后的一个文件
     } catch (IOException e) {
       // log, use defaults
       SolrCore.log.error("Error opening external value source file: " +e);
@@ -283,7 +283,7 @@ public class FileFloatSource extends ValueSource {
         int endIndex = line.length();
         String key = line.substring(0, delimIndex);
         String val = line.substring(delimIndex+1, endIndex);
-
+        // 获取相应的key字段
         float fval;
         try {
           idType.readableToIndexed(key, internalKey);
@@ -296,7 +296,7 @@ public class FileFloatSource extends ValueSource {
           }
           continue;  // go to next line in file.. leave values as default.
         }
-
+        // 查找到相应的key
         if (!termsEnum.seekExact(internalKey, false)) {
           if (notFoundCount<10) {  // collect first 10 not found for logging
             notFound.add(key);
@@ -304,11 +304,11 @@ public class FileFloatSource extends ValueSource {
           notFoundCount++;
           continue;
         }
-
+        // 获取docid
         docsEnum = termsEnum.docs(null, docsEnum, DocsEnum.FLAG_NONE);
         int doc;
         while ((doc = docsEnum.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
-          vals[doc] = fval;
+          vals[doc] = fval; // 更新value数组
         }
       }
 
