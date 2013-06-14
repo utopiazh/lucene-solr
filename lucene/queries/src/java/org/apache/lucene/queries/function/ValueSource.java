@@ -17,15 +17,15 @@ package org.apache.lucene.queries.function;
  * limitations under the License.
  */
 
+import java.io.IOException;
+import java.util.IdentityHashMap;
+import java.util.Map;
+
 import org.apache.lucene.index.AtomicReaderContext;
 import org.apache.lucene.search.FieldComparator;
 import org.apache.lucene.search.FieldComparatorSource;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.SortField;
-
-import java.io.IOException;
-import java.util.IdentityHashMap;
-import java.util.Map;
 
 /**
  * Instantiates {@link FunctionValues} for a particular reader.
