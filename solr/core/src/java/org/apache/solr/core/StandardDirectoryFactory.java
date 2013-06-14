@@ -25,6 +25,7 @@ import org.apache.lucene.store.FSDirectory;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.NRTCachingDirectory;
 import org.apache.lucene.store.RateLimitedDirectoryWrapper;
+import org.apache.solr.core.CachingDirectoryFactory.CacheValue;
 
 /**
  * Directory provider which mimics original Solr 
@@ -45,7 +46,14 @@ public class StandardDirectoryFactory extends CachingDirectoryFactory {
   public String normalize(String path) throws IOException {
     String cpath = new File(path).getCanonicalPath();
     
-    return stripTrailingSlash(cpath);
+    return super.normalize(cpath);
+  }
+  
+  @Override
+  public boolean exists(String path) throws IOException {
+    // we go by the persistent storage ... 
+    File dirFile = new File(path);
+    return dirFile.canRead() && dirFile.list().length > 0;
   }
   
   public boolean isPersistent() {
@@ -59,21 +67,8 @@ public class StandardDirectoryFactory extends CachingDirectoryFactory {
   }
   
   @Override
-  public void remove(Directory dir) throws IOException {
-    CacheValue val = byDirectoryCache.get(dir);
-    if (val == null) {
-      throw new IllegalArgumentException("Unknown directory " + dir);
-    }
-    if (val.path != null) {
-      File dirFile = new File(val.path);
-      FileUtils.deleteDirectory(dirFile);
-    }
-  }
-
-  @Override
-  public void remove(String path) throws IOException {
-    String fullPath = normalize(path);
-    File dirFile = new File(fullPath);
+  protected void removeDirectory(CacheValue cacheValue) throws IOException {
+    File dirFile = new File(cacheValue.path);
     FileUtils.deleteDirectory(dirFile);
   }
   

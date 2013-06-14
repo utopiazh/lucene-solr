@@ -8,8 +8,10 @@ import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.apache.lucene.store.AlreadyClosedException;
 import org.apache.lucene.store.Directory;
 import org.apache.solr.SolrTestCaseJ4;
+import org.apache.solr.common.SolrException;
 import org.apache.solr.core.DirectoryFactory.DirContext;
 import org.junit.Test;
 
@@ -32,7 +34,6 @@ import org.junit.Test;
 
 public class CachingDirectoryFactoryTest extends SolrTestCaseJ4 {
   private Map<String,Tracker> dirs = new HashMap<String,Tracker>();
-  private List<Tracker> oldDirs = new ArrayList<Tracker>();
   private volatile boolean stop = false;
   
   private class Tracker {
@@ -46,20 +47,20 @@ public class CachingDirectoryFactoryTest extends SolrTestCaseJ4 {
     final CachingDirectoryFactory df = new RAMDirectoryFactory();
     
     List<Thread> threads = new ArrayList<Thread>();
-    int threadCount = 3;
+    int threadCount = 11;
     for (int i = 0; i < threadCount; i++) {
       Thread getDirThread = new GetDirThread(df);
       threads.add(getDirThread);
       getDirThread.start();
     }
     
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 4; i++) {
       Thread releaseDirThread = new ReleaseDirThread(df);
       threads.add(releaseDirThread);
       releaseDirThread.start();
     }
     
-    for (int i = 0; i < 1; i++) {
+    for (int i = 0; i < 2; i++) {
       Thread incRefThread = new IncRefThread(df);
       threads.add(incRefThread);
       incRefThread.start();
@@ -67,11 +68,24 @@ public class CachingDirectoryFactoryTest extends SolrTestCaseJ4 {
 
     Thread.sleep(TEST_NIGHTLY ? 30000 : 8000);
     
+    Thread closeThread = new Thread() {
+      public void run() {
+        try {
+          df.close();
+        } catch (IOException e) {
+          throw new RuntimeException(e);
+        }
+      }
+    };
+    closeThread.start();
+    
+    
     stop = true;
     
     for (Thread thread : threads) {
       thread.join();
     }
+    
     
     // do any remaining releases
     synchronized (dirs) {
@@ -85,20 +99,11 @@ public class CachingDirectoryFactoryTest extends SolrTestCaseJ4 {
           }
         }
       }
-      sz = oldDirs.size();
-      if (sz > 0) {
-        for (Tracker tracker : oldDirs) {
-          int cnt = tracker.refCnt.get();
-          for (int i = 0; i < cnt; i++) {
-            tracker.refCnt.decrementAndGet();
-            df.release(tracker.dir);
-          }
-        }
-      }
       
     }
     
-    df.close();
+    closeThread.join();
+
   }
   
   private class ReleaseDirThread extends Thread {
@@ -118,26 +123,33 @@ public class CachingDirectoryFactoryTest extends SolrTestCaseJ4 {
         } catch (InterruptedException e1) {
           throw new RuntimeException(e1);
         }
-        try {
-          synchronized (dirs) {
-            int sz = dirs.size();
-            List<Tracker> dirsList = new ArrayList<Tracker>();
-            dirsList.addAll(dirs.values());
-            if (sz > 0) {
-              Tracker tracker = dirsList.get(Math.min(dirsList.size() - 1,
-                  random.nextInt(sz + 1)));
+        
+        synchronized (dirs) {
+          int sz = dirs.size();
+          List<Tracker> dirsList = new ArrayList<Tracker>();
+          dirsList.addAll(dirs.values());
+          if (sz > 0) {
+            Tracker tracker = dirsList.get(Math.min(dirsList.size() - 1,
+                random.nextInt(sz + 1)));
+            try {
               if (tracker.refCnt.get() > 0) {
-                if (random.nextBoolean()) {
+                if (random.nextInt(10) > 7) {
                   df.doneWithDirectory(tracker.dir);
+                }
+                if (random.nextBoolean()) {
+                  df.remove(tracker.dir);
+                } else {
+                  df.remove(tracker.path);
                 }
                 tracker.refCnt.decrementAndGet();
                 df.release(tracker.dir);
               }
+            } catch (Exception e) {
+              throw new RuntimeException("path:" + tracker.path + "ref cnt:" + tracker.refCnt, e);
             }
           }
-        } catch (IOException e) {
-          throw new RuntimeException(e);
         }
+        
       }
     }
   }
@@ -155,12 +167,21 @@ public class CachingDirectoryFactoryTest extends SolrTestCaseJ4 {
       random = random();
       while (!stop) {
         try {
-          Thread.sleep(random.nextInt(50) + 1);
+          Thread.sleep(random.nextInt(350) + 1);
         } catch (InterruptedException e1) {
           throw new RuntimeException(e1);
         }
         try {
-          String path = "path" + random.nextInt(20);
+          String path;
+          if (random.nextBoolean()) {
+            path = "path" + random.nextInt(20);
+          } else {
+            if (random.nextBoolean()) {
+              path = "path" + random.nextInt(20) + "/" + random.nextInt(20);
+            } else {
+              path = "path" + random.nextInt(20) + "/" + random.nextInt(20) + "/" + random.nextInt(20);
+            }
+          }
           synchronized (dirs) {
             Tracker tracker = dirs.get(path);
             if (tracker == null) {
@@ -169,22 +190,13 @@ public class CachingDirectoryFactoryTest extends SolrTestCaseJ4 {
               tracker.dir = df.get(path, DirContext.DEFAULT, null);
               dirs.put(path, tracker);
             } else {
-              if (random.nextInt(10) > 6) {
-                Tracker oldTracker = new Tracker();
-                oldTracker.refCnt = new AtomicInteger(tracker.refCnt.get());
-                oldTracker.path = tracker.path;
-                oldTracker.dir = tracker.dir;
-                oldDirs.add(oldTracker);
-                
-                tracker.dir = df.get(path, DirContext.DEFAULT, null, true);
-                tracker.refCnt = new AtomicInteger(0);
-              } else {
-                tracker.dir = df.get(path, DirContext.DEFAULT, null);
-              }
+              tracker.dir = df.get(path, DirContext.DEFAULT, null);
             }
             tracker.refCnt.incrementAndGet();
           }
           
+        } catch (AlreadyClosedException e) {
+          log.warn("Cannot get dir, factory is already closed");
         } catch (IOException e) {
           throw new RuntimeException(e);
         }
@@ -215,8 +227,14 @@ public class CachingDirectoryFactoryTest extends SolrTestCaseJ4 {
           Tracker tracker = dirs.get(path);
           
           if (tracker != null && tracker.refCnt.get() > 0) {
+            try {
+              df.incRef(tracker.dir);
+            } catch (SolrException e) {
+              log.warn("", e);
+              continue;
+            }
+            
             tracker.refCnt.incrementAndGet();
-            df.incRef(tracker.dir);
           }
         }
         

@@ -51,6 +51,7 @@ import org.apache.solr.request.LocalSolrQueryRequest;
 import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.request.SolrRequestInfo;
 import org.apache.solr.response.SolrQueryResponse;
+import org.apache.solr.schema.IndexSchema;
 import org.apache.solr.schema.SchemaField;
 import org.apache.solr.search.FunctionRangeQuery;
 import org.apache.solr.search.QParser;
@@ -107,10 +108,12 @@ public class DirectUpdateHandler2 extends UpdateHandler implements SolrCoreState
     softCommitTracker = new CommitTracker("Soft", core, softCommitDocsUpperBound, softCommitTimeUpperBound, true, true);
     
     commitWithinSoftCommit = updateHandlerInfo.commitWithinSoftCommit;
+
+
   }
   
   public DirectUpdateHandler2(SolrCore core, UpdateHandler updateHandler) {
-    super(core);
+    super(core, updateHandler.getUpdateLog());
     solrCoreState = core.getSolrCoreState();
     
     UpdateHandlerInfo updateHandlerInfo = core.getSolrConfig()
@@ -123,12 +126,14 @@ public class DirectUpdateHandler2 extends UpdateHandler implements SolrCoreState
     int softCommitTimeUpperBound = updateHandlerInfo.autoSoftCommmitMaxTime; // getInt("updateHandler/autoSoftCommit/maxTime", -1);
     softCommitTracker = new CommitTracker("Soft", core, softCommitDocsUpperBound, softCommitTimeUpperBound, updateHandlerInfo.openSearcher, true);
     
-    this.ulog = updateHandler.getUpdateLog();
-    if (this.ulog != null) {
+    commitWithinSoftCommit = updateHandlerInfo.commitWithinSoftCommit;
+
+    UpdateLog existingLog = updateHandler.getUpdateLog();
+    if (this.ulog != null && this.ulog == existingLog) {
+      // If we are reusing the existing update log, inform the log that it's update handler has changed.
+      // We do this as late as possible.
       this.ulog.init(this, core);
     }
-    
-    commitWithinSoftCommit = updateHandlerInfo.commitWithinSoftCommit;
   }
 
   private void deleteAll() throws IOException {
@@ -162,6 +167,7 @@ public class DirectUpdateHandler2 extends UpdateHandler implements SolrCoreState
       }
       
       try {
+        IndexSchema schema = cmd.getReq().getSchema();
         
         if (cmd.overwrite) {
           
@@ -401,7 +407,7 @@ public class DirectUpdateHandler2 extends UpdateHandler implements SolrCoreState
       RefCounted<IndexWriter> iw = solrCoreState.getIndexWriter(core);
       try {
         IndexWriter writer = iw.get();
-        writer.updateDocument(idTerm, luceneDocument, core.getSchema()
+        writer.updateDocument(idTerm, luceneDocument, cmd.getReq().getSchema()
             .getAnalyzer());
         
         for (Query q : dbqList) {
@@ -616,8 +622,8 @@ public class DirectUpdateHandler2 extends UpdateHandler implements SolrCoreState
   }
 
   @Override
-  public void newIndexWriter(boolean rollback, boolean forceNewDir) throws IOException {
-    solrCoreState.newIndexWriter(core, rollback, forceNewDir);
+  public void newIndexWriter(boolean rollback) throws IOException {
+    solrCoreState.newIndexWriter(core, rollback);
   }
   
   /**
@@ -749,7 +755,7 @@ public class DirectUpdateHandler2 extends UpdateHandler implements SolrCoreState
 
   @Override
   public void split(SplitIndexCommand cmd) throws IOException {
-    // TODO: do a commit first?
+    commit(new CommitUpdateCommand(cmd.req, false));
     SolrIndexSplitter splitter = new SolrIndexSplitter(cmd);
     splitter.split();
   }

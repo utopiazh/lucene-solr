@@ -17,25 +17,19 @@ package org.apache.solr;
  * limitations under the License.
  */
 
+import java.io.File;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.SortedMap;
+
 import org.apache.solr.client.solrj.SolrServer;
 import org.apache.solr.client.solrj.embedded.EmbeddedSolrServer;
 import org.apache.solr.client.solrj.embedded.JettySolrRunner;
 import org.apache.solr.client.solrj.impl.HttpSolrServer;
 import org.apache.solr.util.ExternalPaths;
-
-import java.io.File;
-import java.util.Collections;
-import java.util.Map;
-import java.util.HashMap;
-import java.util.SortedMap;
-import java.util.TreeMap;
-
-import org.apache.solr.util.RESTfulServerProvider;
-import org.apache.solr.util.RestTestHarness;
 import org.eclipse.jetty.servlet.ServletHolder;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
-import org.restlet.ext.servlet.ServerServlet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,16 +44,30 @@ abstract public class SolrJettyTestBase extends SolrTestCaseJ4
   public String getSolrHome() { return ExternalPaths.EXAMPLE_HOME; }
 
   private static boolean manageSslProps = true;
-  private static final File TEST_KEYSTORE = new File(ExternalPaths.SOURCE_HOME, 
-                                                     "example/etc/solrtest.keystore");
+  private static File TEST_KEYSTORE;
   private static final Map<String,String> SSL_PROPS = new HashMap<String,String>();
   static {
+    TEST_KEYSTORE = (null == ExternalPaths.SOURCE_HOME)
+      ? null : new File(ExternalPaths.SOURCE_HOME, "example/etc/solrtest.keystore");
+    String keystorePath = null == TEST_KEYSTORE ? null : TEST_KEYSTORE.getAbsolutePath();
+
     SSL_PROPS.put("tests.jettySsl","false");
     SSL_PROPS.put("tests.jettySsl.clientAuth","false");
-    SSL_PROPS.put("javax.net.ssl.keyStore", TEST_KEYSTORE.getAbsolutePath());
+    SSL_PROPS.put("javax.net.ssl.keyStore", keystorePath);
     SSL_PROPS.put("javax.net.ssl.keyStorePassword","secret");
-    SSL_PROPS.put("javax.net.ssl.trustStore", TEST_KEYSTORE.getAbsolutePath());
+    SSL_PROPS.put("javax.net.ssl.trustStore", keystorePath);
     SSL_PROPS.put("javax.net.ssl.trustStorePassword","secret");
+  }
+
+  /**
+   * Returns the File object for the example keystore used when this baseclass randomly 
+   * uses SSL.  May be null ifthis test does not appear to be running as part of the 
+   * standard solr distribution and does not have access to the example configs.
+   *
+   * @lucene.internal 
+   */
+  protected static File getExampleKeystoreFile() {
+    return TEST_KEYSTORE;
   }
 
   @BeforeClass
@@ -69,19 +77,26 @@ abstract public class SolrJettyTestBase extends SolrTestCaseJ4
     final boolean trySsl = random().nextBoolean();
     final boolean trySslClientAuth = random().nextBoolean();
     
+    // only randomize SSL if we are a solr test with access to the example keystore
+    if (null == getExampleKeystoreFile()) {
+      log.info("Solr's example keystore not defined (not a solr test?) skipping SSL randomization");
+      manageSslProps = false;
+      return;
+    }
+
+    assertTrue("test keystore does not exist, randomized ssl testing broken: " +
+               getExampleKeystoreFile().getAbsolutePath(), 
+               getExampleKeystoreFile().exists() );
+    
     // only randomize SSL if none of the SSL_PROPS are already set
     final Map<Object,Object> sysprops = System.getProperties();
     for (String prop : SSL_PROPS.keySet()) {
       if (sysprops.containsKey(prop)) {
         log.info("System property explicitly set, so skipping randomized ssl properties: " + prop);
         manageSslProps = false;
-        break;
+        return;
       }
     }
-
-    assertTrue("test keystore does not exist, can't be used for randomized " +
-               "ssl testing: " + TEST_KEYSTORE.getAbsolutePath(), 
-               TEST_KEYSTORE.exists() );
 
     if (manageSslProps) {
       log.info("Randomized ssl ({}) and clientAuth ({})", trySsl, trySslClientAuth);
@@ -159,7 +174,7 @@ abstract public class SolrJettyTestBase extends SolrTestCaseJ4
     if (jetty != null) {
       try {
         // setup the server...
-        String url = jetty.getBaseUrl().toString();
+        String url = jetty.getBaseUrl().toString() + "/" + "collection1";
         HttpSolrServer s = new HttpSolrServer( url );
         s.setConnectionTimeout(DEFAULT_CONNECTION_TIMEOUT);
         s.setDefaultMaxConnectionsPerHost(100);

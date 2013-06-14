@@ -55,6 +55,7 @@
     <module>misc</module>
     <module>queries</module>
     <module>queryparser</module>
+    <module>replicator</module>
     <module>sandbox</module>
     <module>spatial</module>
     <module>suggest</module>
@@ -77,6 +78,7 @@
               </bundledSignatures>
               <signaturesFiles>
                 <signaturesFile>${top-level}/lucene/tools/forbiddenApis/executors.txt</signaturesFile>
+                <signaturesFile>${top-level}/lucene/tools/forbiddenApis/chars.txt</signaturesFile>
               </signaturesFiles>
             </configuration>
             <goals>
@@ -95,6 +97,7 @@
               <signaturesFiles>
                 <signaturesFile>${top-level}/lucene/tools/forbiddenApis/tests.txt</signaturesFile>
                 <signaturesFile>${top-level}/lucene/tools/forbiddenApis/executors.txt</signaturesFile>
+                <signaturesFile>${top-level}/lucene/tools/forbiddenApis/chars.txt</signaturesFile>
               </signaturesFiles>
             </configuration>
             <goals>

@@ -23,6 +23,7 @@ import org.apache.solr.common.SolrException.ErrorCode;
 import org.apache.solr.common.SolrInputDocument;
 import org.apache.solr.common.params.ModifiableSolrParams;
 import org.apache.solr.common.params.SolrParams;
+import org.apache.solr.common.params.UpdateParams;
 import org.apache.solr.common.util.ExecutorUtil;
 import org.apache.solr.common.util.NamedList;
 import org.apache.solr.core.PluginInfo;
@@ -34,8 +35,10 @@ import org.apache.solr.response.SolrQueryResponse;
 import org.apache.solr.search.SolrIndexSearcher;
 import org.apache.solr.update.processor.DistributedUpdateProcessor;
 import org.apache.solr.update.processor.DistributedUpdateProcessorFactory;
+import org.apache.solr.update.processor.DistributingUpdateProcessorFactory;
 import org.apache.solr.update.processor.RunUpdateProcessorFactory;
 import org.apache.solr.update.processor.UpdateRequestProcessor;
+import org.apache.solr.update.processor.UpdateRequestProcessorChain;
 import org.apache.solr.util.DefaultSolrThreadFactory;
 import org.apache.solr.util.RefCounted;
 import org.apache.solr.util.plugin.PluginInfoInitialized;
@@ -186,6 +189,10 @@ public class UpdateLog implements PluginInfoInitialized {
     defaultSyncLevel = SyncLevel.getSyncLevel((String)info.initArgs.get("syncLevel"));
   }
 
+  /* Note, when this is called, uhandler is not completely constructed.
+   * This must be called when a new log is created, or
+   * for an existing log whenever the core or update handler changes.
+   */
   public void init(UpdateHandler uhandler, SolrCore core) {
     // ulogDir from CoreDescriptor overrides
     String ulogDir = core.getCoreDescriptor().getUlogDir();
@@ -965,6 +972,8 @@ public class UpdateLog implements PluginInfoInitialized {
               log.warn("Exception reverse reading log", ex);
               break;
             }
+
+            numUpdates++;
           }
 
         } catch (IOException e) {
@@ -986,7 +995,7 @@ public class UpdateLog implements PluginInfoInitialized {
     }
   }
 
-
+  /** The RecentUpdates object returned must be closed after use */
   public RecentUpdates getRecentUpdates() {
     Deque<TransactionLog> logList;
     synchronized (this) {
@@ -1006,9 +1015,21 @@ public class UpdateLog implements PluginInfoInitialized {
 
     // TODO: what if I hand out a list of updates, then do an update, then hand out another list (and
     // one of the updates I originally handed out fell off the list).  Over-request?
-    RecentUpdates recentUpdates = new RecentUpdates();
-    recentUpdates.logList = logList;
-    recentUpdates.update();
+
+    boolean success = false;
+    RecentUpdates recentUpdates = null;
+    try {
+      recentUpdates = new RecentUpdates();
+      recentUpdates.logList = logList;
+      recentUpdates.update();
+      success = true;
+    } finally {
+      // defensive: if some unknown exception is thrown,
+      // make sure we close so that the tlogs are decref'd
+      if (!success && recentUpdates != null) {
+        recentUpdates.close();
+      }
+    }
 
     return recentUpdates;
   }
@@ -1129,14 +1150,15 @@ public class UpdateLog implements PluginInfoInitialized {
   class LogReplayer implements Runnable {
     private Logger loglog = log;  // set to something different?
 
-    List<TransactionLog> translogs;
+    Deque<TransactionLog> translogs;
     TransactionLog.LogReader tlogReader;
     boolean activeLog;
     boolean finishing = false;  // state where we lock out other updates and finish those updates that snuck in before we locked
     boolean debug = loglog.isDebugEnabled();
 
     public LogReplayer(List<TransactionLog> translogs, boolean activeLog) {
-      this.translogs = translogs;
+      this.translogs = new LinkedList<TransactionLog>();
+      this.translogs.addAll(translogs);
       this.activeLog = activeLog;
     }
 
@@ -1156,7 +1178,9 @@ public class UpdateLog implements PluginInfoInitialized {
       SolrRequestInfo.setRequestInfo(new SolrRequestInfo(req, rsp));    // setting request info will help logging
 
       try {
-        for (TransactionLog translog : translogs) {
+        for(;;) {
+          TransactionLog translog = translogs.pollFirst();
+          if (translog == null) break;
           doReplay(translog);
         }
       } catch (SolrException e) {
@@ -1175,6 +1199,13 @@ public class UpdateLog implements PluginInfoInitialized {
         state = State.ACTIVE;
         if (finishing) {
           versionInfo.unblockUpdates();
+        }
+
+        // clean up in case we hit some unexpected exception and didn't get
+        // to more transaction logs
+        for (TransactionLog translog : translogs) {
+          log.error("ERROR: didn't get to recover from tlog " + translog);
+          translog.decref();
         }
       }
 
@@ -1195,13 +1226,8 @@ public class UpdateLog implements PluginInfoInitialized {
         // NOTE: we don't currently handle a core reload during recovery.  This would cause the core
         // to change underneath us.
 
-        // TODO: use the standard request factory?  We won't get any custom configuration instantiating this way.
-        RunUpdateProcessorFactory runFac = new RunUpdateProcessorFactory();
-        DistributedUpdateProcessorFactory magicFac = new DistributedUpdateProcessorFactory();
-        runFac.init(new NamedList());
-        magicFac.init(new NamedList());
-
-        UpdateRequestProcessor proc = magicFac.getInstance(req, rsp, runFac.getInstance(req, rsp, null));
+        UpdateRequestProcessorChain processorChain = req.getCore().getUpdateProcessingChain(null);
+        UpdateRequestProcessor proc = processorChain.createProcessor(req, rsp);
 
         long commitVersion = 0;
         int operationAndFlags = 0;

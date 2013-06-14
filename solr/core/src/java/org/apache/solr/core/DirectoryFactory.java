@@ -93,6 +93,26 @@ public abstract class DirectoryFactory implements NamedListInitializedPlugin,
   public abstract void remove(Directory dir) throws IOException;
   
   /**
+   * Removes the Directory's persistent storage.
+   * For example: A file system impl may remove the
+   * on disk directory.
+   * @throws IOException If there is a low-level I/O error.
+   * 
+   */
+  public abstract void remove(Directory dir, boolean afterCoreClose) throws IOException;
+  
+  /**
+   * This remove is special in that it may be called even after
+   * the factory has been closed. Remove only makes sense for
+   * persistent directory factories.
+   * 
+   * @param path to remove
+   * @param afterCoreClose whether to wait until after the core is closed.
+   * @throws IOException If there is a low-level I/O error.
+   */
+  public abstract void remove(String path, boolean afterCoreClose) throws IOException;
+  
+  /**
    * This remove is special in that it may be called even after
    * the factory has been closed. Remove only makes sense for
    * persistent directory factories.
@@ -120,26 +140,11 @@ public abstract class DirectoryFactory implements NamedListInitializedPlugin,
    * Returns the Directory for a given path, using the specified rawLockType.
    * Will return the same Directory instance for the same path.
    * 
-   * Note: sometimes you might pass null for the rawLockType when
-   * you know the Directory exists and the rawLockType is already
-   * in use.
    * 
    * @throws IOException If there is a low-level I/O error.
    */
   public abstract Directory get(String path, DirContext dirContext, String rawLockType)
       throws IOException;
-  
-  /**
-   * Returns the Directory for a given path, using the specified rawLockType.
-   * Will return the same Directory instance for the same path unless forceNew,
-   * in which case a new Directory is returned. There is no need to call
-   * {@link #doneWithDirectory(Directory)} in this case - the old Directory
-   * will be closed when it's ref count hits 0.
-   * 
-   * @throws IOException If there is a low-level I/O error.
-   */
-  public abstract Directory get(String path,  DirContext dirContext, String rawLockType,
-      boolean forceNew) throws IOException;
   
   /**
    * Increment the number of references to the given Directory. You must call

@@ -112,7 +112,7 @@ class DocumentsWriterPerThread {
 
     // Only called by asserts
     public boolean testPoint(String name) {
-      return docWriter.writer.testPoint(name);
+      return docWriter.testPoint(name);
     }
 
     public void clear() {
@@ -232,6 +232,13 @@ class DocumentsWriterPerThread {
     aborting = true;
   }
   
+  final boolean testPoint(String message) {
+    if (infoStream.isEnabled("TP")) {
+      infoStream.message("TP", message);
+    }
+    return true;
+  }
+  
   boolean checkAndResetHasAborted() {
     final boolean retval = hasAborted;
     hasAborted = false;
@@ -239,7 +246,7 @@ class DocumentsWriterPerThread {
   }
 
   public void updateDocument(IndexDocument doc, Analyzer analyzer, Term delTerm) throws IOException {
-    assert writer.testPoint("DocumentsWriterPerThread addDocument start");
+    assert testPoint("DocumentsWriterPerThread addDocument start");
     assert deleteQueue != null;
     docState.doc = doc;
     docState.analyzer = analyzer;
@@ -292,7 +299,7 @@ class DocumentsWriterPerThread {
   }
   
   public int updateDocuments(Iterable<? extends IndexDocument> docs, Analyzer analyzer, Term delTerm) throws IOException {
-    assert writer.testPoint("DocumentsWriterPerThread addDocuments start");
+    assert testPoint("DocumentsWriterPerThread addDocuments start");
     assert deleteQueue != null;
     docState.analyzer = analyzer;
     if (segmentInfo == null) {
@@ -428,7 +435,6 @@ class DocumentsWriterPerThread {
   /** Reset after a flush */
   private void doAfterFlush() {
     segmentInfo = null;
-    consumer.doAfterFlush();
     directory.getCreatedFiles().clear();
     fieldInfos = new FieldInfos.Builder(fieldInfos.globalFieldNumbers);
     parent.subtractFlushedNumDocs(numDocsInRAM);
@@ -555,7 +561,7 @@ class DocumentsWriterPerThread {
 
     SegmentInfoPerCommit newSegment = flushedSegment.segmentInfo;
 
-    IndexWriter.setDiagnostics(newSegment.info, "flush");
+    IndexWriter.setDiagnostics(newSegment.info, IndexWriter.SOURCE_FLUSH);
     
     IOContext context = new IOContext(new FlushInfo(newSegment.info.getDocCount(), newSegment.sizeInBytes()));
 

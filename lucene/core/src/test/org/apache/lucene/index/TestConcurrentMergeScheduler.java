@@ -58,6 +58,9 @@ public class TestConcurrentMergeScheduler extends LuceneTestCase {
         boolean isClose = false;
         StackTraceElement[] trace = new Exception().getStackTrace();
         for (int i = 0; i < trace.length; i++) {
+          if (isDoFlush && isClose) {
+            break;
+          }
           if ("flush".equals(trace[i].getMethodName())) {
             isDoFlush = true;
           }
@@ -365,7 +368,7 @@ public class TestConcurrentMergeScheduler extends LuceneTestCase {
         w.deleteDocuments(new Term("id", ""+random().nextInt(i+1)));
       }
     }
-    assertTrue(((TrackingCMS) iwc.getMergeScheduler()).totMergedBytes != 0);
+    assertTrue(((TrackingCMS) w.w.getConfig().getMergeScheduler()).totMergedBytes != 0);
     w.close();
     d.close();
   }

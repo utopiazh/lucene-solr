@@ -43,8 +43,8 @@ import org.apache.lucene.store.RAMOutputStream;
 import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.Bits;
 import org.apache.lucene.util.BytesRef;
-import org.apache.lucene.util.FixedBitSet;
-import org.apache.lucene.util.SorterTemplate;
+import org.apache.lucene.util.TimSorter;
+import org.apache.lucene.util.automaton.CompiledAutomaton;
 
 /**
  * An {@link AtomicReader} which supports sorting documents by a given
@@ -66,14 +66,12 @@ public class SortingAtomicReader extends FilterAtomicReader {
 
   private static class SortingFields extends FilterFields {
 
-    private final int[] old2new;
-    private final Bits inLiveDocs;
+    private final Sorter.DocMap docMap;
     private final FieldInfos infos;
 
-    public SortingFields(final Fields in, final Bits inLiveDocs, FieldInfos infos, final int[] old2new) {
+    public SortingFields(final Fields in, FieldInfos infos, Sorter.DocMap docMap) {
       super(in);
-      this.old2new = old2new;
-      this.inLiveDocs = inLiveDocs;
+      this.docMap = docMap;
       this.infos = infos;
     }
 
@@ -83,7 +81,7 @@ public class SortingAtomicReader extends FilterAtomicReader {
       if (terms == null) {
         return null;
       } else {
-        return new SortingTerms(terms, inLiveDocs, infos.fieldInfo(field).getIndexOptions(), old2new);
+        return new SortingTerms(terms, infos.fieldInfo(field).getIndexOptions(), docMap);
       }
     }
 
@@ -91,75 +89,102 @@ public class SortingAtomicReader extends FilterAtomicReader {
 
   private static class SortingTerms extends FilterTerms {
 
-    private final int[] old2new;
-    private final Bits inLiveDocs;
+    private final Sorter.DocMap docMap;
     private final IndexOptions indexOptions;
     
-    public SortingTerms(final Terms in, final Bits inLiveDocs, IndexOptions indexOptions, final int[] old2new) {
+    public SortingTerms(final Terms in, IndexOptions indexOptions, final Sorter.DocMap docMap) {
       super(in);
-      this.old2new = old2new;
-      this.inLiveDocs = inLiveDocs;
+      this.docMap = docMap;
       this.indexOptions = indexOptions;
     }
 
     @Override
     public TermsEnum iterator(final TermsEnum reuse) throws IOException {
-      return new SortingTermsEnum(in.iterator(reuse), inLiveDocs, old2new, indexOptions);
+      return new SortingTermsEnum(in.iterator(reuse), docMap, indexOptions);
+    }
+
+    @Override
+    public TermsEnum intersect(CompiledAutomaton compiled, BytesRef startTerm)
+        throws IOException {
+      return new SortingTermsEnum(in.intersect(compiled, startTerm), docMap, indexOptions);
     }
 
   }
 
   private static class SortingTermsEnum extends FilterTermsEnum {
 
-    private final int[] old2new;
-    private final Bits inLiveDocs;
+    final Sorter.DocMap docMap; // pkg-protected to avoid synthetic accessor methods
     private final IndexOptions indexOptions;
     
-    public SortingTermsEnum(final TermsEnum in, final Bits inLiveDocs, final int[] old2new, IndexOptions indexOptions) {
+    public SortingTermsEnum(final TermsEnum in, Sorter.DocMap docMap, IndexOptions indexOptions) {
       super(in);
-      this.old2new = old2new;
-      this.inLiveDocs = inLiveDocs;
+      this.docMap = docMap;
       this.indexOptions = indexOptions;
+    }
+
+    Bits newToOld(final Bits liveDocs) {
+      if (liveDocs == null) {
+        return null;
+      }
+      return new Bits() {
+
+        @Override
+        public boolean get(int index) {
+          return liveDocs.get(docMap.oldToNew(index));
+        }
+
+        @Override
+        public int length() {
+          return liveDocs.length();
+        }
+
+      };
     }
 
     @Override
     public DocsEnum docs(Bits liveDocs, DocsEnum reuse, final int flags) throws IOException {
-      if (liveDocs != null) {
-        liveDocs = inLiveDocs;
-      }
-      
-      // if we're asked to reuse the given DocsEnum and it is Sorting, return
-      // the wrapped one, since some Codecs expect it.
+      final DocsEnum inReuse;
+      final SortingDocsEnum wrapReuse;
       if (reuse != null && reuse instanceof SortingDocsEnum) {
-        reuse = ((SortingDocsEnum) reuse).getWrapped();
+        // if we're asked to reuse the given DocsEnum and it is Sorting, return
+        // the wrapped one, since some Codecs expect it.
+        wrapReuse = (SortingDocsEnum) reuse;
+        inReuse = wrapReuse.getWrapped();
+      } else {
+        wrapReuse = null;
+        inReuse = reuse;
       }
-      boolean withFreqs = indexOptions.compareTo(IndexOptions.DOCS_AND_FREQS) >=0 && (flags & DocsEnum.FLAG_FREQS) != 0;
-      return new SortingDocsEnum(in.docs(liveDocs, reuse, flags), withFreqs, old2new);
+
+      final DocsEnum inDocs = in.docs(newToOld(liveDocs), inReuse, flags);
+      final boolean withFreqs = indexOptions.compareTo(IndexOptions.DOCS_AND_FREQS) >=0 && (flags & DocsEnum.FLAG_FREQS) != 0;
+      return new SortingDocsEnum(docMap.size(), wrapReuse, inDocs, withFreqs, docMap);
     }
 
     @Override
     public DocsAndPositionsEnum docsAndPositions(Bits liveDocs, DocsAndPositionsEnum reuse, final int flags) throws IOException {
-      if (liveDocs != null) {
-        liveDocs = inLiveDocs;
-      }
-      
-      // if we're asked to reuse the given DocsAndPositionsEnum and it is
-      // Sorting, return the wrapped one, since some Codecs expect it.
+      final DocsAndPositionsEnum inReuse;
+      final SortingDocsAndPositionsEnum wrapReuse;
       if (reuse != null && reuse instanceof SortingDocsAndPositionsEnum) {
-        reuse = ((SortingDocsAndPositionsEnum) reuse).getWrapped();
-      }
-      
-      final DocsAndPositionsEnum positions = in.docsAndPositions(liveDocs, reuse, flags);
-      if (positions == null) {
-        return null;
+        // if we're asked to reuse the given DocsEnum and it is Sorting, return
+        // the wrapped one, since some Codecs expect it.
+        wrapReuse = (SortingDocsAndPositionsEnum) reuse;
+        inReuse = wrapReuse.getWrapped();
       } else {
-        // we ignore the fact that offsets may be stored but not asked for,
-        // since this code is expected to be used during addIndexes which will
-        // ask for everything. if that assumption changes in the future, we can
-        // factor in whether 'flags' says offsets are not required.
-        boolean storeOffsets = indexOptions.compareTo(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS) >= 0;
-        return new SortingDocsAndPositionsEnum(positions, old2new, storeOffsets);
+        wrapReuse = null;
+        inReuse = reuse;
       }
+
+      final DocsAndPositionsEnum inDocsAndPositions = in.docsAndPositions(newToOld(liveDocs), inReuse, flags);
+      if (inDocsAndPositions == null) {
+        return null;
+      }
+
+      // we ignore the fact that offsets may be stored but not asked for,
+      // since this code is expected to be used during addIndexes which will
+      // ask for everything. if that assumption changes in the future, we can
+      // factor in whether 'flags' says offsets are not required.
+      final boolean storeOffsets = indexOptions.compareTo(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS) >= 0;
+      return new SortingDocsAndPositionsEnum(docMap.size(), wrapReuse, inDocsAndPositions, docMap, storeOffsets);
     }
 
   }
@@ -167,48 +192,48 @@ public class SortingAtomicReader extends FilterAtomicReader {
   private static class SortingBinaryDocValues extends BinaryDocValues {
     
     private final BinaryDocValues in;
-    private final int[] new2old;
+    private final Sorter.DocMap docMap;
     
-    SortingBinaryDocValues(BinaryDocValues in, int[] new2old) {
+    SortingBinaryDocValues(BinaryDocValues in, Sorter.DocMap docMap) {
       this.in = in;
-      this.new2old = new2old;
+      this.docMap = docMap;
     }
 
     @Override
     public void get(int docID, BytesRef result) {
-      in.get(new2old[docID], result);
+      in.get(docMap.newToOld(docID), result);
     }
   }
   
   private static class SortingNumericDocValues extends NumericDocValues {
 
     private final NumericDocValues in;
-    private final int[] new2old;
+    private final Sorter.DocMap docMap;
 
-    public SortingNumericDocValues(final NumericDocValues in, final int[] new2old) {
+    public SortingNumericDocValues(final NumericDocValues in, Sorter.DocMap docMap) {
       this.in = in;
-      this.new2old = new2old;
+      this.docMap = docMap;
     }
 
     @Override
     public long get(int docID) {
-      return in.get(new2old[docID]);
+      return in.get(docMap.newToOld(docID));
     }
   }
   
   private static class SortingSortedDocValues extends SortedDocValues {
     
     private final SortedDocValues in;
-    private final int[] new2old;
+    private final Sorter.DocMap docMap;
     
-    SortingSortedDocValues(SortedDocValues in, int[] new2old) {
+    SortingSortedDocValues(SortedDocValues in, Sorter.DocMap docMap) {
       this.in = in;
-      this.new2old = new2old;
+      this.docMap = docMap;
     }
 
     @Override
     public int getOrd(int docID) {
-      return in.getOrd(new2old[docID]);
+      return in.getOrd(docMap.newToOld(docID));
     }
 
     @Override
@@ -223,7 +248,7 @@ public class SortingAtomicReader extends FilterAtomicReader {
 
     @Override
     public void get(int docID, BytesRef result) {
-      in.get(new2old[docID], result);
+      in.get(docMap.newToOld(docID), result);
     }
 
     @Override
@@ -235,11 +260,11 @@ public class SortingAtomicReader extends FilterAtomicReader {
   private static class SortingSortedSetDocValues extends SortedSetDocValues {
     
     private final SortedSetDocValues in;
-    private final int[] new2old;
+    private final Sorter.DocMap docMap;
     
-    SortingSortedSetDocValues(SortedSetDocValues in, int[] new2old) {
+    SortingSortedSetDocValues(SortedSetDocValues in, Sorter.DocMap docMap) {
       this.in = in;
-      this.new2old = new2old;
+      this.docMap = docMap;
     }
 
     @Override
@@ -249,7 +274,7 @@ public class SortingAtomicReader extends FilterAtomicReader {
 
     @Override
     public void setDocument(int docID) {
-      in.setDocument(new2old[docID]);
+      in.setDocument(docMap.newToOld(docID));
     }
 
     @Override
@@ -268,33 +293,31 @@ public class SortingAtomicReader extends FilterAtomicReader {
     }
   }
 
-  private static class SortingDocsEnum extends FilterDocsEnum {
+  static class SortingDocsEnum extends FilterDocsEnum {
     
-    private static final class DocFreqSorterTemplate extends SorterTemplate {
+    private static final class DocFreqSorter extends TimSorter {
       
-      private final int[] docs;
-      private final int[] freqs;
+      private int[] docs;
+      private int[] freqs;
+      private final int[] tmpDocs;
+      private int[] tmpFreqs;
       
-      private int pivot;
-      
-      public DocFreqSorterTemplate(int[] docs, int[] freqs) {
+      public DocFreqSorter(int maxDoc) {
+        super(maxDoc / 64);
+        this.tmpDocs = new int[maxDoc / 64];
+      }
+
+      public void reset(int[] docs, int[] freqs) {
         this.docs = docs;
         this.freqs = freqs;
+        if (freqs != null && tmpFreqs == null) {
+          tmpFreqs = new int[tmpDocs.length];
+        }
       }
-      
+
       @Override
       protected int compare(int i, int j) {
         return docs[i] - docs[j];
-      }
-      
-      @Override
-      protected int comparePivot(int j) {
-        return pivot - docs[j];
-      }
-      
-      @Override
-      protected void setPivot(int i) {
-        pivot = docs[i];
       }
       
       @Override
@@ -303,60 +326,117 @@ public class SortingAtomicReader extends FilterAtomicReader {
         docs[i] = docs[j];
         docs[j] = tmpDoc;
         
-        int tmpFreq = freqs[i];
-        freqs[i] = freqs[j];
-        freqs[j] = tmpFreq;
+        if (freqs != null) {
+          int tmpFreq = freqs[i];
+          freqs[i] = freqs[j];
+          freqs[j] = tmpFreq;
+        }
+      }
+
+      @Override
+      protected void copy(int src, int dest) {
+        docs[dest] = docs[src];
+        if (freqs != null) {
+          freqs[dest] = freqs[src];
+        }
+      }
+
+      @Override
+      protected void save(int i, int len) {
+        System.arraycopy(docs, i, tmpDocs, 0, len);
+        if (freqs != null) {
+          System.arraycopy(freqs, i, tmpFreqs, 0, len);
+        }
+      }
+
+      @Override
+      protected void restore(int i, int j) {
+        docs[j] = tmpDocs[i];
+        if (freqs != null) {
+          freqs[j] = tmpFreqs[i];
+        }
+      }
+
+      @Override
+      protected int compareSaved(int i, int j) {
+        return tmpDocs[i] - docs[j];
       }
     }
-    
-    private int[] docs = new int[64];
+
+    private final int maxDoc;
+    private final DocFreqSorter sorter;
+    private int[] docs;
     private int[] freqs;
     private int docIt = -1;
     private final int upto;
     private final boolean withFreqs;
-    
-    public SortingDocsEnum(final DocsEnum in, boolean withFreqs, final int[] old2new) throws IOException {
+
+    SortingDocsEnum(int maxDoc, SortingDocsEnum reuse, final DocsEnum in, boolean withFreqs, final Sorter.DocMap docMap) throws IOException {
       super(in);
+      this.maxDoc = maxDoc;
       this.withFreqs = withFreqs;
+      if (reuse != null) {
+        if (reuse.maxDoc == maxDoc) {
+          sorter = reuse.sorter;
+        } else {
+          sorter = new DocFreqSorter(maxDoc);
+        }
+        docs = reuse.docs;
+        freqs = reuse.freqs; // maybe null
+      } else {
+        docs = new int[64];
+        sorter = new DocFreqSorter(maxDoc);
+      }
+      docIt = -1;
       int i = 0;
       int doc;
       if (withFreqs) {
-        freqs = new int[docs.length];
+        if (freqs == null || freqs.length < docs.length) {
+          freqs = new int[docs.length];
+        }
         while ((doc = in.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS){
           if (i >= docs.length) {
             docs = ArrayUtil.grow(docs, docs.length + 1);
             freqs = ArrayUtil.grow(freqs, freqs.length + 1);
           }
-          docs[i] = old2new[doc];
+          docs[i] = docMap.oldToNew(doc);
           freqs[i] = in.freq();
           ++i;
         }
-        SorterTemplate sorter = new DocFreqSorterTemplate(docs, freqs);
-        sorter.quickSort(0, i - 1);
       } else {
         freqs = null;
         while ((doc = in.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS){
           if (i >= docs.length) {
             docs = ArrayUtil.grow(docs, docs.length + 1);
           }
-          docs[i++] = old2new[doc];
+          docs[i++] = docMap.oldToNew(doc);
         }
-        Arrays.sort(docs, 0, i);
       }
+      // TimSort can save much time compared to other sorts in case of
+      // reverse sorting, or when sorting a concatenation of sorted readers
+      sorter.reset(docs, freqs);
+      sorter.sort(0, i);
       upto = i;
     }
-    
+
+    // for testing
+    boolean reused(DocsEnum other) {
+      if (other == null || !(other instanceof SortingDocsEnum)) {
+        return false;
+      }
+      return docs == ((SortingDocsEnum) other).docs;
+    }
+
     @Override
     public int advance(final int target) throws IOException {
       // need to support it for checkIndex, but in practice it won't be called, so
       // don't bother to implement efficiently for now.
-      while (nextDoc() < target) {}
-      return docID();
+      return slowAdvance(target);
     }
     
     @Override
     public int docID() {
-      return docIt >= upto ? NO_MORE_DOCS : docs[docIt];
+      return docIt < 0 ? -1 : docIt >= upto ? NO_MORE_DOCS : docs[docIt];
     }
     
     @Override
@@ -376,38 +456,34 @@ public class SortingAtomicReader extends FilterAtomicReader {
     }
   }
   
-  private static class SortingDocsAndPositionsEnum extends FilterDocsAndPositionsEnum {
+  static class SortingDocsAndPositionsEnum extends FilterDocsAndPositionsEnum {
     
     /**
-     * A {@link SorterTemplate} which sorts two parallel arrays of doc IDs and
+     * A {@link Sorter} which sorts two parallel arrays of doc IDs and
      * offsets in one go. Everytime a doc ID is 'swapped', its correponding offset
      * is swapped too.
      */
-    private static final class DocOffsetSorterTemplate extends SorterTemplate {
+    private static final class DocOffsetSorter extends TimSorter {
       
-      private final int[] docs;
-      private final long[] offsets;
+      private int[] docs;
+      private long[] offsets;
+      private final int[] tmpDocs;
+      private final long[] tmpOffsets;
       
-      private int pivot;
-      
-      public DocOffsetSorterTemplate(int[] docs, long[] offsets) {
+      public DocOffsetSorter(int maxDoc) {
+        super(maxDoc / 64);
+        this.tmpDocs = new int[maxDoc / 64];
+        this.tmpOffsets = new long[maxDoc / 64];
+      }
+
+      public void reset(int[] docs, long[] offsets) {
         this.docs = docs;
         this.offsets = offsets;
       }
-      
+
       @Override
       protected int compare(int i, int j) {
         return docs[i] - docs[j];
-      }
-      
-      @Override
-      protected int comparePivot(int j) {
-        return pivot - docs[j];
-      }
-      
-      @Override
-      protected void setPivot(int i) {
-        pivot = docs[i];
       }
       
       @Override
@@ -420,8 +496,33 @@ public class SortingAtomicReader extends FilterAtomicReader {
         offsets[i] = offsets[j];
         offsets[j] = tmpOffset;
       }
+
+      @Override
+      protected void copy(int src, int dest) {
+        docs[dest] = docs[src];
+        offsets[dest] = offsets[src];
+      }
+
+      @Override
+      protected void save(int i, int len) {
+        System.arraycopy(docs, i, tmpDocs, 0, len);
+        System.arraycopy(offsets, i, tmpOffsets, 0, len);
+      }
+
+      @Override
+      protected void restore(int i, int j) {
+        docs[j] = tmpDocs[i];
+        offsets[j] = tmpOffsets[i];
+      }
+
+      @Override
+      protected int compareSaved(int i, int j) {
+        return tmpDocs[i] - docs[j];
+      }
     }
     
+    private final int maxDoc;
+    private final DocOffsetSorter sorter;
     private int[] docs;
     private long[] offsets;
     private final int upto;
@@ -433,55 +534,84 @@ public class SortingAtomicReader extends FilterAtomicReader {
     private int pos;
     private int startOffset = -1;
     private int endOffset = -1;
-    private final BytesRef payload = new BytesRef(32);
+    private final BytesRef payload;
     private int currFreq;
-    
-    public SortingDocsAndPositionsEnum(final DocsAndPositionsEnum in, final int[] old2new, boolean storeOffsets) throws IOException {
+
+    private final RAMFile file;
+
+    SortingDocsAndPositionsEnum(int maxDoc, SortingDocsAndPositionsEnum reuse, final DocsAndPositionsEnum in, Sorter.DocMap docMap, boolean storeOffsets) throws IOException {
       super(in);
+      this.maxDoc = maxDoc;
       this.storeOffsets = storeOffsets;
-      final RAMFile file = new RAMFile();
+      if (reuse != null) {
+        docs = reuse.docs;
+        offsets = reuse.offsets;
+        payload = reuse.payload;
+        file = reuse.file;
+        if (reuse.maxDoc == maxDoc) {
+          sorter = reuse.sorter;
+        } else {
+          sorter = new DocOffsetSorter(maxDoc);
+        }
+      } else {
+        docs = new int[32];
+        offsets = new long[32];
+        payload = new BytesRef(32);
+        file = new RAMFile();
+        sorter = new DocOffsetSorter(maxDoc);
+      }
       final IndexOutput out = new RAMOutputStream(file);
-      docs = new int[32];
-      offsets = new long[32];
       int doc;
       int i = 0;
       while ((doc = in.nextDoc()) != DocIdSetIterator.NO_MORE_DOCS) {
         if (i == docs.length) {
-          docs = ArrayUtil.grow(docs, docs.length + 1);
-          // don't grow() offsets since growing pattern for long and int is not the same.
-          // since we want docs and offsets at the same length, just grow it manually.
-          long[] tmp = new long[docs.length];
-          System.arraycopy(offsets, 0, tmp, 0, offsets.length);
-          offsets = tmp;
+          final int newLength = ArrayUtil.oversize(i + 1, 4);
+          docs = Arrays.copyOf(docs, newLength);
+          offsets = Arrays.copyOf(offsets, newLength);
         }
-        docs[i] = old2new[doc];
+        docs[i] = docMap.oldToNew(doc);
         offsets[i] = out.getFilePointer();
         addPositions(in, out);
         i++;
       }
       upto = i;
-      SorterTemplate sorter = new DocOffsetSorterTemplate(docs, offsets);
-      sorter.quickSort(0, upto - 1);
+      sorter.reset(docs, offsets);
+      sorter.sort(0, upto);
       out.close();
       this.postingInput = new RAMInputStream("", file);
     }
-    
+
+    // for testing
+    boolean reused(DocsAndPositionsEnum other) {
+      if (other == null || !(other instanceof SortingDocsAndPositionsEnum)) {
+        return false;
+      }
+      return docs == ((SortingDocsAndPositionsEnum) other).docs;
+    }
+
     private void addPositions(final DocsAndPositionsEnum in, final IndexOutput out) throws IOException {
       int freq = in.freq();
       out.writeVInt(freq);
+      int previousPosition = 0;
+      int previousEndOffset = 0;
       for (int i = 0; i < freq; i++) {
         final int pos = in.nextPosition();
-        out.writeVInt(pos);
+        final BytesRef payload = in.getPayload();
+        // The low-order bit of token is set only if there is a payload, the
+        // previous bits are the delta-encoded position. 
+        final int token = (pos - previousPosition) << 1 | (payload == null ? 0 : 1);
+        out.writeVInt(token);
+        previousPosition = pos;
         if (storeOffsets) { // don't encode offsets if they are not stored
-          out.writeVInt(in.startOffset());
-          out.writeVInt(in.endOffset());
+          final int startOffset = in.startOffset();
+          final int endOffset = in.endOffset();
+          out.writeVInt(startOffset - previousEndOffset);
+          out.writeVInt(endOffset - startOffset);
+          previousEndOffset = endOffset;
         }
-        BytesRef payload = in.getPayload();
         if (payload != null) {
           out.writeVInt(payload.length);
           out.writeBytes(payload.bytes, payload.offset, payload.length);
-        } else {
-          out.writeVInt(0);
         }
       }
     }
@@ -490,13 +620,12 @@ public class SortingAtomicReader extends FilterAtomicReader {
     public int advance(final int target) throws IOException {
       // need to support it for checkIndex, but in practice it won't be called, so
       // don't bother to implement efficiently for now.
-      while (nextDoc() < target) {}
-      return docID();
+      return slowAdvance(target);
     }
     
     @Override
     public int docID() {
-      return docIt >= upto ? NO_MORE_DOCS : docs[docIt];
+      return docIt < 0 ? -1 : docIt >= upto ? NO_MORE_DOCS : docs[docIt];
     }
     
     @Override
@@ -519,24 +648,30 @@ public class SortingAtomicReader extends FilterAtomicReader {
       if (++docIt >= upto) return DocIdSetIterator.NO_MORE_DOCS;
       postingInput.seek(offsets[docIt]);
       currFreq = postingInput.readVInt();
+      // reset variables used in nextPosition
+      pos = 0;
+      endOffset = 0;
       return docs[docIt];
     }
     
     @Override
     public int nextPosition() throws IOException {
-      pos = postingInput.readVInt();
+      final int token = postingInput.readVInt();
+      pos += token >>> 1;
       if (storeOffsets) {
-        startOffset = postingInput.readVInt();
-        endOffset = postingInput.readVInt();
+        startOffset = endOffset + postingInput.readVInt();
+        endOffset = startOffset + postingInput.readVInt();
       }
-      int length = postingInput.readVInt();
-      if (length > 0) {
-        if (length >= payload.bytes.length) {
-          payload.grow(length + 1);
+      if ((token & 1) != 0) {
+        payload.offset = 0;
+        payload.length = postingInput.readVInt();
+        if (payload.length > payload.bytes.length) {
+          payload.bytes = new byte[ArrayUtil.oversize(payload.length, 1)];
         }
-        postingInput.readBytes(payload.bytes, 0, length);
+        postingInput.readBytes(payload.bytes, 0, payload.length);
+      } else {
+        payload.length = 0;
       }
-      payload.length = length;
       return pos;
     }
     
@@ -551,38 +686,36 @@ public class SortingAtomicReader extends FilterAtomicReader {
     }
   }
 
-  private final int[] old2new, new2old;
-  private final FixedBitSet mappedLiveDocs;
+  /** Return a sorted view of <code>reader</code> according to the order
+   *  defined by <code>sorter</code>. If the reader is already sorted, this
+   *  method might return the reader as-is. */
+  public static AtomicReader wrap(AtomicReader reader, Sorter sorter) throws IOException {
+    return wrap(reader, sorter.sort(reader));
+  }
 
-  public SortingAtomicReader(final AtomicReader in, final Sorter sorter) throws IOException {
+  /** Expert: same as {@link #wrap(AtomicReader, Sorter)} but operates directly on a {@link Sorter.DocMap}. */
+  public static AtomicReader wrap(AtomicReader reader, Sorter.DocMap docMap) {
+    if (docMap == null) {
+      // the reader is already sorter
+      return reader;
+    }
+    if (reader.maxDoc() != docMap.size()) {
+      throw new IllegalArgumentException("reader.maxDoc() should be equal to docMap.size(), got" + reader.maxDoc() + " != " + docMap.size());
+    }
+    assert Sorter.isConsistent(docMap);
+    return new SortingAtomicReader(reader, docMap);
+  }
+
+  final Sorter.DocMap docMap; // pkg-protected to avoid synthetic accessor methods
+
+  private SortingAtomicReader(final AtomicReader in, final Sorter.DocMap docMap) {
     super(in);
-    old2new = sorter.oldToNew(in);
-    if (old2new.length != in.maxDoc()) {
-      throw new IllegalArgumentException("sorter should provide mapping for every document in the index, including deleted ones");
-    }
-    new2old = new int[old2new.length];
-    for (int i = 0; i < new2old.length; i++) {
-      new2old[old2new[i]] = i;
-    }
-    
-    if (!in.hasDeletions()) {
-      mappedLiveDocs = null;
-    } else {
-      mappedLiveDocs = new FixedBitSet(in.maxDoc());
-      mappedLiveDocs.set(0, in.maxDoc());
-      Bits liveDocs = in.getLiveDocs();
-      int len = liveDocs.length();
-      for (int i = 0; i < len; i++) {
-        if (!liveDocs.get(i)) {
-          mappedLiveDocs.clear(old2new[i]);
-        }
-      }
-    }
+    this.docMap = docMap;
   }
 
   @Override
   public void document(final int docID, final StoredFieldVisitor visitor) throws IOException {
-    in.document(new2old[docID], visitor);
+    in.document(docMap.newToOld(docID), visitor);
   }
   
   @Override
@@ -591,7 +724,7 @@ public class SortingAtomicReader extends FilterAtomicReader {
     if (fields == null) {
       return null;
     } else {
-      return new SortingFields(fields, in.getLiveDocs(), in.getFieldInfos(), old2new);
+      return new SortingFields(fields, in.getFieldInfos(), docMap);
     }
   }
   
@@ -601,14 +734,29 @@ public class SortingAtomicReader extends FilterAtomicReader {
     if (oldDocValues == null) {
       return null;
     } else {
-      return new SortingBinaryDocValues(oldDocValues, new2old);
+      return new SortingBinaryDocValues(oldDocValues, docMap);
     }
   }
   
   @Override
   public Bits getLiveDocs() {
-    ensureOpen();
-    return mappedLiveDocs;
+    final Bits inLiveDocs = in.getLiveDocs();
+    if (inLiveDocs == null) {
+      return null;
+    }
+    return new Bits() {
+
+      @Override
+      public boolean get(int index) {
+        return inLiveDocs.get(docMap.newToOld(index));
+      }
+
+      @Override
+      public int length() {
+        return inLiveDocs.length();
+      }
+
+    };
   }
   
   @Override
@@ -617,7 +765,7 @@ public class SortingAtomicReader extends FilterAtomicReader {
     if (norm == null) {
       return null;
     } else {
-      return new SortingNumericDocValues(norm, new2old);
+      return new SortingNumericDocValues(norm, docMap);
     }
   }
 
@@ -625,7 +773,7 @@ public class SortingAtomicReader extends FilterAtomicReader {
   public NumericDocValues getNumericDocValues(String field) throws IOException {
     final NumericDocValues oldDocValues = in.getNumericDocValues(field);
     if (oldDocValues == null) return null;
-    return new SortingNumericDocValues(oldDocValues, new2old);
+    return new SortingNumericDocValues(oldDocValues, docMap);
   }
 
   @Override
@@ -634,7 +782,7 @@ public class SortingAtomicReader extends FilterAtomicReader {
     if (sortedDV == null) {
       return null;
     } else {
-      return new SortingSortedDocValues(sortedDV, new2old);
+      return new SortingSortedDocValues(sortedDV, docMap);
     }
   }
   
@@ -644,13 +792,13 @@ public class SortingAtomicReader extends FilterAtomicReader {
     if (sortedSetDV == null) {
       return null;
     } else {
-      return new SortingSortedSetDocValues(sortedSetDV, new2old);
+      return new SortingSortedSetDocValues(sortedSetDV, docMap);
     }  
   }
 
   @Override
   public Fields getTermVectors(final int docID) throws IOException {
-    return in.getTermVectors(new2old[docID]);
+    return in.getTermVectors(docMap.newToOld(docID));
   }
   
 }

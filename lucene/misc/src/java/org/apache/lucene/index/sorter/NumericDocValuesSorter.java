@@ -18,48 +18,64 @@ package org.apache.lucene.index.sorter;
  */
 
 import java.io.IOException;
-import java.util.AbstractList;
-import java.util.List;
 
 import org.apache.lucene.index.AtomicReader;
 import org.apache.lucene.index.NumericDocValues;
 
 /**
  * A {@link Sorter} which sorts documents according to their
- * {@link NumericDocValues}.
+ * {@link NumericDocValues}. One can specify ascending or descending sort order.
  * 
  * @lucene.experimental
  */
 public class NumericDocValuesSorter extends Sorter {
 
   private final String fieldName;
-
+  private final boolean ascending;
+  
+  /** Constructor over the given field name, and ascending sort order. */
   public NumericDocValuesSorter(final String fieldName) {
+    this(fieldName, true);
+  }
+  
+  /**
+   * Constructor over the given field name, and whether sorting should be
+   * ascending ({@code true}) or descending ({@code false}).
+   */
+  public NumericDocValuesSorter(final String fieldName, boolean ascending) {
     this.fieldName = fieldName;
+    this.ascending = ascending;
   }
 
   @Override
-  public int[] oldToNew(final AtomicReader reader) throws IOException {
+  public Sorter.DocMap sort(final AtomicReader reader) throws IOException {
     final NumericDocValues ndv = reader.getNumericDocValues(fieldName);
-    final int maxDoc = reader.maxDoc();
-    final int[] docs = new int[maxDoc];
-    final List<Long> values = new AbstractList<Long>() {
-
-      @Override
-      public Long get(int doc) {
-        return ndv.get(doc);
-      }
-
-      @Override
-      public int size() {
-        return reader.maxDoc();
-      }
-      
-    };
-    for (int i = 0; i < maxDoc; i++) {
-      docs[i] = i;
+    final DocComparator comparator;
+    if (ascending) {
+      comparator = new DocComparator() {
+        @Override
+        public int compare(int docID1, int docID2) {
+          final long v1 = ndv.get(docID1);
+          final long v2 = ndv.get(docID2);
+          return v1 < v2 ? -1 : v1 == v2 ? 0 : 1;
+        }
+      };
+    } else {
+      comparator = new DocComparator() {
+        @Override
+        public int compare(int docID1, int docID2) {
+          final long v1 = ndv.get(docID1);
+          final long v2 = ndv.get(docID2);
+          return v1 > v2 ? -1 : v1 == v2 ? 0 : 1;
+        }
+      };
     }
-    return compute(docs, values);
+    return sort(reader.maxDoc(), comparator);
+  }
+  
+  @Override
+  public String getID() {
+    return "DocValues(" + fieldName + "," + (ascending ? "ascending" : "descending") + ")";
   }
   
 }

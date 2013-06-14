@@ -17,7 +17,6 @@
 
 package org.apache.solr.update.processor;
 
-import java.io.IOException;
 import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -32,11 +31,6 @@ import org.apache.solr.core.SolrCore;
 import org.apache.solr.common.SolrException;
 import static org.apache.solr.common.SolrException.ErrorCode.*;
 import org.apache.solr.common.util.NamedList;
-import org.apache.solr.request.SolrQueryRequest;
-import org.apache.solr.response.SolrQueryResponse;
-import org.apache.solr.update.AddUpdateCommand;
-import org.apache.solr.schema.IndexSchema;
-import org.apache.solr.schema.FieldType;
 import org.apache.solr.util.plugin.SolrCoreAware;
 
 
@@ -112,6 +106,13 @@ public abstract class FieldMutatingUpdateProcessorFactory
     public Set<String> typeName = Collections.emptySet();
     public Collection<String> typeClass = Collections.emptyList();
     public Collection<Pattern> fieldRegex = Collections.emptyList();
+    public Boolean fieldNameMatchesSchemaField = null; // null => not specified
+
+    public boolean noSelectorsSpecified() {
+      return typeClass.isEmpty()  && typeName.isEmpty() 
+          && fieldRegex.isEmpty() && fieldName.isEmpty() 
+          && null == fieldNameMatchesSchemaField;
+    }
   }
 
   private SelectorParams inclusions = new SelectorParams();
@@ -127,7 +128,6 @@ public abstract class FieldMutatingUpdateProcessorFactory
                             " inform(SolrCore) never called???");
   }
 
-  @SuppressWarnings("unchecked")
   public static SelectorParams parseSelectorParams(NamedList args) {
     SelectorParams params = new SelectorParams();
     
@@ -151,13 +151,16 @@ public abstract class FieldMutatingUpdateProcessorFactory
     // resolve this into actual Class objects later
     params.typeClass = oneOrMany(args, "typeClass");
 
+    // getBooleanArg() returns null if the arg is not specified
+    params.fieldNameMatchesSchemaField = getBooleanArg(args, "fieldNameMatchesSchemaField");
+    
     return params;
   }
                                                             
 
   /**
    * Handles common initialization related to source fields for 
-   * constructoring the FieldNameSelector to be used.
+   * constructing the FieldNameSelector to be used.
    *
    * Will error if any unexpected init args are found, so subclasses should
    * remove any subclass-specific init args before calling this method.
@@ -199,29 +202,15 @@ public abstract class FieldMutatingUpdateProcessorFactory
   @Override
   public void inform(final SolrCore core) {
     
-    final IndexSchema schema = core.getSchema();
-
     selector = 
       FieldMutatingUpdateProcessor.createFieldNameSelector
-      (core.getResourceLoader(),
-       core.getSchema(),
-       inclusions.fieldName,
-       inclusions.typeName,
-       inclusions.typeClass,
-       inclusions.fieldRegex,
-       getDefaultSelector(core));
+          (core.getResourceLoader(), core, inclusions, getDefaultSelector(core));
 
     for (SelectorParams exc : exclusions) {
       selector = FieldMutatingUpdateProcessor.wrap
         (selector,
          FieldMutatingUpdateProcessor.createFieldNameSelector
-         (core.getResourceLoader(),
-          core.getSchema(),
-          exc.fieldName,
-          exc.typeName,
-          exc.typeClass,
-          exc.fieldRegex,
-          FieldMutatingUpdateProcessor.SELECT_NO_FIELDS));
+             (core.getResourceLoader(), core, exc, FieldMutatingUpdateProcessor.SELECT_NO_FIELDS));
     }
   }
   
@@ -278,7 +267,28 @@ public abstract class FieldMutatingUpdateProcessorFactory
     return result;
   }
 
+  /**
+   * Removes the first instance of the key from NamedList, returning the Boolean
+   * that key referred to, or null if the key is not specified.
+   * @exception SolrException invalid type or structure
+   */
+  public static Boolean getBooleanArg(final NamedList args, final String key) {
+    Boolean bool;
+    List values = args.getAll(key);
+    if (0 == values.size()) {
+      return null;
+    }
+    if (values.size() > 1) {
+      throw new SolrException(SERVER_ERROR, "Only one '" + key + "' is allowed");
+    }
+    Object o = args.remove(key);
+    if (o instanceof Boolean) {
+      bool = (Boolean)o;
+    } else if (o instanceof CharSequence) {
+      bool = Boolean.parseBoolean(o.toString());
+    } else {
+      throw new SolrException(SERVER_ERROR, "'" + key + "' must have type 'bool' or 'str'; found " + o.getClass());
+    }
+    return bool;
+  }
 }
-
-
-

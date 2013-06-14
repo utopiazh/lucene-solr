@@ -58,7 +58,7 @@ public class TestConjunctions extends LuceneTestCase {
     writer.addDocument(doc("nutch", "nutch is an internet search engine with web crawler and is using lucene and hadoop"));
     reader = writer.getReader();
     writer.close();
-    searcher = new IndexSearcher(reader);
+    searcher = newSearcher(reader);
     searcher.setSimilarity(new TFSimilarity());
   }
   
@@ -109,18 +109,8 @@ public class TestConjunctions extends LuceneTestCase {
     }
 
     @Override
-    public ExactSimScorer exactSimScorer(SimWeight weight, AtomicReaderContext context) throws IOException {
-      return new ExactSimScorer() {
-        @Override
-        public float score(int doc, int freq) {
-          return freq;
-        }
-      };
-    }
-
-    @Override
-    public SloppySimScorer sloppySimScorer(SimWeight weight, AtomicReaderContext context) throws IOException {
-      return new SloppySimScorer() {
+    public SimScorer simScorer(SimWeight weight, AtomicReaderContext context) throws IOException {
+      return new SimScorer() {
         @Override
         public float score(int doc, float freq) {
           return freq;
